@@ -111,3 +111,53 @@ Once the program is stopped, you will not be able to continue execution as you c
 within each frame, which can be very useful in identifying the root cause of the crash.
 
 You can find additional information on debugging Zed crashes [here](./debugging-crashes.md).
+
+## Using built in logs
+
+Zed provides basic logging out of the box, but for deeper insights you may need to increase verbosity. The default log level is **INFO**, which gives minimal information about application flow. To access finer-grained details, you can adjust the log level globally or per crate.
+
+Global Log Level (All Crates)
+```sh
+RUST_LOG=debug zed . --foreground
+```
+
+This sets all crates to use the **DEBUG** log level for comprehensive output during development. **TRACE** log level is used for additional verbosity.
+
+### Per-Crate Log Level
+You can also fine-tune individual crates:
+```sh
+RUST_LOG=ollama=debug zed .
+```
+Replace `ollama` with the crate name whose logs you want to inspect more closely. This allows precise control over which parts of your code emit debug information.
+
+### Adding Logging Statements
+If existing logs don't provide enough detail, insert custom debug messages:
+
+```rust
+
+// Example: Insert a debug statement at relevant point
+log::debug!("Starting critical operation in {}", function_name);
+```
+
+#### Best Practices
+
+- **Specificity:** Use meaningful names and contexts (e.g., `function_name`, `variable_state`).
+- **Avoid Overload:**
+   - **Contextual Clarity:** Pair each log line with meaningful context (e.g., `function_name`, `variable_state`).
+   - **Selective Use of TRACE:** Only use this level for data that truly demands granular visibility—API payloads, complex internal structures.
+   - **Frequency Management:** INFO should be reserved for once‑or-twice per major action; excessive info can make logs noisy.
+
+#### Example
+
+In crate "editor" in file "scroll.rs"
+```rust
+log::trace!(
+    "Saving scroll position for item {item_id:?} in workspace {workspace_id:?}"
+);
+```
+
+results in
+
+```
+2025-11-10T20:00:00+00:00 TRACE [editor::scroll] Saving scroll position for item 21474836576 in workspace WorkspaceId(1)
+```
