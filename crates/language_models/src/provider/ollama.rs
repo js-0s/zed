@@ -249,10 +249,9 @@ impl LanguageModelProvider for OllamaLanguageModelProvider {
 
         // Override with available models from settings
         for setting_model in &OllamaLanguageModelProvider::settings(cx).available_models {
-            let setting_base = setting_model.name.split(':').next().unwrap();
             if let Some(model) = models
                 .values_mut()
-                .find(|m| m.name.split(':').next().unwrap() == setting_base)
+                .find(|m| m.name == setting_model.name)
             {
                 model.max_tokens = setting_model.max_tokens;
                 model.display_name = setting_model.display_name.clone();
@@ -381,10 +380,14 @@ impl OllamaLanguageModel {
                                 thinking = Some(text)
                             }
                             MessageContent::ToolUse(tool_use) => {
-                                tool_calls.push(OllamaToolCall::Function(OllamaFunctionCall {
-                                    name: tool_use.name.to_string(),
-                                    arguments: tool_use.input,
-                                }));
+                                tool_calls.push(OllamaToolCall {
+                                    id: None,
+                                    function: OllamaFunctionCall {
+                                        index: None,
+                                        name: tool_use.name.to_string(),
+                                        arguments: tool_use.input,
+                                    },
+                                });
                             }
                             _ => (),
                         }
@@ -575,25 +578,25 @@ fn map_to_language_model_completion_events(
                     }
 
                     if let Some(tool_call) = tool_calls.and_then(|v| v.into_iter().next()) {
-                        match tool_call {
-                            OllamaToolCall::Function(function) => {
-                                let tool_id = format!(
-                                    "{}-{}",
-                                    &function.name,
-                                    TOOL_CALL_COUNTER.fetch_add(1, Ordering::Relaxed)
-                                );
-                                let event =
-                                    LanguageModelCompletionEvent::ToolUse(LanguageModelToolUse {
-                                        id: LanguageModelToolUseId::from(tool_id),
-                                        name: Arc::from(function.name),
-                                        raw_input: function.arguments.to_string(),
-                                        input: function.arguments,
-                                        is_input_complete: true,
-                                    });
-                                events.push(Ok(event));
-                                state.used_tools = true;
-                            }
-                        }
+                        // Directly access the struct fields
+                        let function = tool_call.function; // Accessing the function field
+                        let tool_id = tool_call.id.unwrap_or_else(|| {
+                            format!(
+                                "{}-{}",
+                                &function.name, // Assuming `function` has a `name` field
+                                TOOL_CALL_COUNTER.fetch_add(1, Ordering::Relaxed)
+                            )
+                        }); // Access id, handle Option
+
+                        let event = LanguageModelCompletionEvent::ToolUse(LanguageModelToolUse {
+                            id: LanguageModelToolUseId::from(tool_id),
+                            name: Arc::from(function.name),
+                            raw_input: function.arguments.to_string(),
+                            input: function.arguments,
+                            is_input_complete: true,
+                        });
+                        events.push(Ok(event));
+                        state.used_tools = true;
                     } else if !content.is_empty() {
                         events.push(Ok(LanguageModelCompletionEvent::Text(content)));
                     }
