@@ -2,10 +2,14 @@ use anyhow::{Context as _, Result};
 use futures::{AsyncBufReadExt, AsyncReadExt, StreamExt, io::BufReader, stream::BoxStream};
 use http_client::{AsyncBody, HttpClient, HttpRequestExt, Method, Request as HttpRequest};
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{Number, Value};
 pub use settings::KeepAlive;
 
 pub const OLLAMA_API_URL: &str = "http://localhost:11434";
+
+// this crate configures debug logging, enable with
+// RUST_LOG=ollama=debug zed . --foreground
+// trace level to see actual messages send&received
 
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
@@ -103,12 +107,14 @@ pub enum ChatMessage {
 
 #[derive(Serialize, Deserialize, Debug)]
 #[serde(rename_all = "lowercase")]
-pub enum OllamaToolCall {
-    Function(OllamaFunctionCall),
+pub struct OllamaToolCall {
+    pub function: OllamaFunctionCall,
+    pub id: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
 pub struct OllamaFunctionCall {
+    pub index: Option<Number>,
     pub name: String,
     pub arguments: Value,
 }
@@ -281,24 +287,48 @@ pub async fn stream_chat_completion(
     request: ChatRequest,
 ) -> Result<BoxStream<'static, Result<ChatResponseDelta>>> {
     let uri = format!("{api_url}/api/chat");
+    let body = serde_json::to_string(&request)?;
     let request = HttpRequest::builder()
         .method(Method::POST)
-        .uri(uri)
+        .uri(&uri)
         .header("Content-Type", "application/json")
         .when_some(api_key, |builder, api_key| {
             builder.header("Authorization", format!("Bearer {api_key}"))
         })
-        .body(AsyncBody::from(serde_json::to_string(&request)?))?;
-
+        .body(AsyncBody::from(body.clone()))?;
+    log::debug!("Sending stream_chat_completion: {}", uri);
+    log::trace!(
+        "Sending stream_chat_completion: {:?}",
+        body
+    );
     let mut response = client.send(request).await?;
+    log::debug!(
+        "Received stream_chat_completion: status = {}",
+        response.status()
+    );
     if response.status().is_success() {
         let reader = BufReader::new(response.into_body());
 
         Ok(reader
             .lines()
-            .map(|line| match line {
-                Ok(line) => serde_json::from_str(&line).context("Unable to parse chat response"),
-                Err(e) => Err(e.into()),
+            .map(|line| {
+                match line {
+                    Ok(line) => {
+                        log::trace!("Received stream_chat_completion line: {}", line);
+                        match serde_json::from_str::<ChatResponseDelta>(&line) {
+                            Ok(parsed) => Ok(parsed),
+                            Err(parse_error) => {
+                                log::error!(
+                                    "Unable to parse chat response: line: {} error: {:?}",
+                                    line,
+                                    parse_error
+                                );
+                                Err(parse_error.into())
+                            }
+                        }
+                    }
+                    Err(e) => Err(e.into()),
+                }
             })
             .boxed())
     } else {
@@ -320,17 +350,26 @@ pub async fn get_models(
     let uri = format!("{api_url}/api/tags");
     let request = HttpRequest::builder()
         .method(Method::GET)
-        .uri(uri)
+        .uri(&uri)
         .header("Accept", "application/json")
         .when_some(api_key, |builder, api_key| {
             builder.header("Authorization", format!("Bearer {api_key}"))
         })
         .body(AsyncBody::default())?;
 
+    log::debug!("Sending get_models: {}", uri);
     let mut response = client.send(request).await?;
 
     let mut body = String::new();
     response.body_mut().read_to_string(&mut body).await?;
+    log::debug!(
+        "Received get_models: status={}",
+        response.status(),
+    );
+    log::trace!(
+        "Received get_models: body={}",
+        &body,
+    );
 
     anyhow::ensure!(
         response.status().is_success(),
@@ -351,21 +390,30 @@ pub async fn show_model(
     model: &str,
 ) -> Result<ModelShow> {
     let uri = format!("{api_url}/api/show");
+    let body = serde_json::json!({ "model": model }).to_string();
     let request = HttpRequest::builder()
         .method(Method::POST)
-        .uri(uri)
+        .uri(&uri)
         .header("Content-Type", "application/json")
         .when_some(api_key, |builder, api_key| {
             builder.header("Authorization", format!("Bearer {api_key}"))
         })
         .body(AsyncBody::from(
-            serde_json::json!({ "model": model }).to_string(),
+            body.clone(),
         ))?;
+    log::debug!("Sending show_models: {} {}", uri, body);
 
     let mut response = client.send(request).await?;
     let mut body = String::new();
     response.body_mut().read_to_string(&mut body).await?;
-
+    log::debug!(
+        "Received show_models: status={}",
+        response.status(),
+    );
+    log::trace!(
+        "Received show_models: body={}",
+        &body
+    );
     anyhow::ensure!(
         response.status().is_success(),
         "Failed to connect to Ollama API: {} {}",
@@ -445,6 +493,54 @@ mod tests {
                 "tool_calls": [
                     {
                         "function": {
+                            "name": "weather",
+                            "arguments": {
+                                "city": "london",
+                            }
+                        }
+                    }
+                ]
+            },
+            "done_reason": "stop",
+            "done": true,
+            "total_duration": 2758629166u64,
+            "load_duration": 1770059875,
+            "prompt_eval_count": 147,
+            "prompt_eval_duration": 684637583,
+            "eval_count": 16,
+            "eval_duration": 302561917,
+        });
+
+        let result: ChatResponseDelta = serde_json::from_value(response).unwrap();
+        match result.message {
+            ChatMessage::Assistant {
+                content,
+                tool_calls,
+                images: _,
+                thinking,
+            } => {
+                assert!(content.is_empty());
+                assert!(tool_calls.is_some_and(|v| !v.is_empty()));
+                assert!(thinking.is_none());
+            }
+            _ => panic!("Deserialized wrong role"),
+        }
+    }
+
+    #[test]
+    fn parse_tool_call_ollama_0_10_12() {
+        // Tool call response as of 2025-11: https://github.com/ollama/ollama/pull/12956
+        let response = serde_json::json!({
+            "model": "llama3.2:3b",
+            "created_at": "2025-04-28T20:02:02.140489Z",
+            "message": {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [
+                    {
+                        "id": "call_f5kqwpjg",
+                        "function": {
+                            "index": 0,
                             "name": "weather",
                             "arguments": {
                                 "city": "london",
