@@ -7,6 +7,10 @@ pub use settings::KeepAlive;
 
 pub const OLLAMA_API_URL: &str = "http://localhost:11434";
 
+// this crate configures debug logging, enable with
+// RUST_LOG=ollama=debug zed . --foreground
+// trace level to see actual messages send&received
+
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
 pub struct Model {
@@ -283,10 +287,7 @@ pub async fn stream_chat_completion(
     request: ChatRequest,
 ) -> Result<BoxStream<'static, Result<ChatResponseDelta>>> {
     let uri = format!("{api_url}/api/chat");
-    log::info!(
-        "Chat request: {:?}",
-        serde_json::to_string(&request).unwrap()
-    );
+    let body = serde_json::to_string(&request)?;
     let request = HttpRequest::builder()
         .method(Method::POST)
         .uri(&uri)
@@ -294,11 +295,15 @@ pub async fn stream_chat_completion(
         .when_some(api_key, |builder, api_key| {
             builder.header("Authorization", format!("Bearer {api_key}"))
         })
-        .body(AsyncBody::from(serde_json::to_string(&request)?))?;
-    log::info!("Sending request to Ollama: {}", uri);
+        .body(AsyncBody::from(body.clone()))?;
+    log::debug!("Sending stream_chat_completion: {}", uri);
+    log::trace!(
+        "Sending stream_chat_completion: {:?}",
+        body
+    );
     let mut response = client.send(request).await?;
-    log::info!(
-        "Received response from Ollama: status = {}",
+    log::debug!(
+        "Received stream_chat_completion: status = {}",
         response.status()
     );
     if response.status().is_success() {
@@ -309,12 +314,16 @@ pub async fn stream_chat_completion(
             .map(|line| {
                 match line {
                     Ok(line) => {
-                        log::info!("Received line from Ollama: {}", line);
+                        log::trace!("Received stream_chat_completion line: {}", line);
                         match serde_json::from_str::<ChatResponseDelta>(&line) {
-                            Ok(parsed) => Ok(parsed), // Successfully parsed
+                            Ok(parsed) => Ok(parsed),
                             Err(parse_error) => {
-                                log::error!("Unable to parse chat response: {:?}", parse_error);
-                                Err(parse_error.into()) // Handle parsing error
+                                log::error!(
+                                    "Unable to parse chat response: line: {} error: {:?}",
+                                    line,
+                                    parse_error
+                                );
+                                Err(parse_error.into())
                             }
                         }
                     }
@@ -341,17 +350,26 @@ pub async fn get_models(
     let uri = format!("{api_url}/api/tags");
     let request = HttpRequest::builder()
         .method(Method::GET)
-        .uri(uri)
+        .uri(&uri)
         .header("Accept", "application/json")
         .when_some(api_key, |builder, api_key| {
             builder.header("Authorization", format!("Bearer {api_key}"))
         })
         .body(AsyncBody::default())?;
 
+    log::debug!("Sending get_models: {}", uri);
     let mut response = client.send(request).await?;
 
     let mut body = String::new();
     response.body_mut().read_to_string(&mut body).await?;
+    log::debug!(
+        "Received get_models: status={}",
+        response.status(),
+    );
+    log::trace!(
+        "Received get_models: body={}",
+        &body,
+    );
 
     anyhow::ensure!(
         response.status().is_success(),
@@ -372,21 +390,30 @@ pub async fn show_model(
     model: &str,
 ) -> Result<ModelShow> {
     let uri = format!("{api_url}/api/show");
+    let body = serde_json::json!({ "model": model }).to_string();
     let request = HttpRequest::builder()
         .method(Method::POST)
-        .uri(uri)
+        .uri(&uri)
         .header("Content-Type", "application/json")
         .when_some(api_key, |builder, api_key| {
             builder.header("Authorization", format!("Bearer {api_key}"))
         })
         .body(AsyncBody::from(
-            serde_json::json!({ "model": model }).to_string(),
+            body.clone(),
         ))?;
+    log::debug!("Sending show_models: {} {}", uri, body);
 
     let mut response = client.send(request).await?;
     let mut body = String::new();
     response.body_mut().read_to_string(&mut body).await?;
-
+    log::debug!(
+        "Received show_models: status={}",
+        response.status(),
+    );
+    log::trace!(
+        "Received show_models: body={}",
+        &body
+    );
     anyhow::ensure!(
         response.status().is_success(),
         "Failed to connect to Ollama API: {} {}",
