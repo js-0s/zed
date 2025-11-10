@@ -249,10 +249,9 @@ impl LanguageModelProvider for OllamaLanguageModelProvider {
 
         // Override with available models from settings
         for setting_model in &OllamaLanguageModelProvider::settings(cx).available_models {
-            let setting_base = setting_model.name.split(':').next().unwrap();
             if let Some(model) = models
                 .values_mut()
-                .find(|m| m.name.split(':').next().unwrap() == setting_base)
+                .find(|m| m.name == setting_model.name)
             {
                 model.max_tokens = setting_model.max_tokens;
                 model.display_name = setting_model.display_name.clone();
